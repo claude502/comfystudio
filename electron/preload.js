@@ -345,6 +345,30 @@ contextBridge.exposeInMainWorld('electronAPI', {
   deleteSetting: (key) => ipcRenderer.invoke('settings:delete', key),
 
   // ============================================
+  // AIVideo Workbench
+  // ============================================
+
+  aivideo: {
+    getDefaults: () => ipcRenderer.invoke('aivideo:getDefaults'),
+    selectCoreDir: () => ipcRenderer.invoke('aivideo:selectCoreDir'),
+    selectProjectDir: (options = {}) => ipcRenderer.invoke('aivideo:selectProjectDir', options),
+    selectProjectFile: (options = {}) => ipcRenderer.invoke('aivideo:selectProjectFile', options),
+    createProject: (payload = {}) => ipcRenderer.invoke('aivideo:createProject', payload),
+    loadProjectBundle: (payload = {}) => ipcRenderer.invoke('aivideo:loadProjectBundle', payload),
+    saveProjectJson: (payload = {}) => ipcRenderer.invoke('aivideo:saveProjectJson', payload),
+    runProject: (payload = {}) => ipcRenderer.invoke('aivideo:runProject', payload),
+    cancelRun: () => ipcRenderer.invoke('aivideo:cancelRun'),
+    getRunState: () => ipcRenderer.invoke('aivideo:getRunState'),
+    readEventLog: (payload = {}) => ipcRenderer.invoke('aivideo:readEventLog', payload),
+    openPath: (filePath) => ipcRenderer.invoke('aivideo:openPath', filePath),
+    onRunnerEvent: (cb) => {
+      const handler = (_, data) => cb(data)
+      ipcRenderer.on('aivideo:runnerEvent', handler)
+      return () => ipcRenderer.removeListener('aivideo:runnerEvent', handler)
+    },
+  },
+
+  // ============================================
   // Workflow Setup Manager
   // ============================================
 

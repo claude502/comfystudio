@@ -19,6 +19,11 @@ const {
   LAUNCHER_SETTING_KEY,
   safeCloneConfig: safeCloneLauncherConfig,
 } = require('./comfyLauncher')
+const {
+  AIVideoRunner,
+  createDefaultCoreDir,
+  resolveNodeCommand,
+} = require('./aivideoRunner')
 
 const isDev = !app.isPackaged
 
@@ -32,6 +37,7 @@ const COMFY_CONNECTION_SETTING_KEY = 'comfyConnection'
 const DEFAULT_LOCAL_COMFY_PORT = 8188
 const COMFY_CLOUD_CREDITS_PER_USD = 211
 const MAIN_WINDOW_STATE_SETTING_KEY = 'mainWindowState'
+const AIVIDEO_WORKBENCH_SETTING_KEY = 'aivideoWorkbench'
 const DEFAULT_MAIN_WINDOW_BOUNDS = Object.freeze({ width: 1600, height: 1000 })
 const COMFYSTUDIO_BRIDGE_DIR_NAME = 'comfystudio_bridge'
 const COMFYSTUDIO_BRIDGE_VERSION = '0.1.0'
@@ -63,6 +69,13 @@ let restoreFullscreenAfterMinimize = false
 let mainWindowStateSaveTimer = null
 const settingsPath = path.join(app.getPath('userData'), 'settings.json')
 let settingsWriteQueue = Promise.resolve()
+const aivideoRunner = new AIVideoRunner({
+  onEvent(event) {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('aivideo:runnerEvent', event)
+    }
+  },
+})
 
 function resolvePackagedBinaryPath(binaryPath) {
   if (!binaryPath || typeof binaryPath !== 'string') return binaryPath
@@ -3288,6 +3301,417 @@ ipcMain.handle('settings:delete', async (event, key) => {
     return { success: true }
   } catch (err) {
     return { success: false, error: err.message }
+  }
+})
+
+// ============================================
+// AIVideo Workbench IPC
+// ============================================
+
+async function getAivideoWorkbenchSettings() {
+  try {
+    const settings = await readSettingsRaw()
+    return settings?.[AIVIDEO_WORKBENCH_SETTING_KEY] || {}
+  } catch (_) {
+    return {}
+  }
+}
+
+async function setAivideoWorkbenchSettings(partial = {}) {
+  await writeSettingsRaw((settings) => ({
+    ...settings,
+    [AIVIDEO_WORKBENCH_SETTING_KEY]: {
+      ...(settings?.[AIVIDEO_WORKBENCH_SETTING_KEY] || {}),
+      ...partial,
+    },
+  }))
+}
+
+const AIVIDEO_SECRET_KEY_PATTERN = /(^|[_-])(api[_-]?key|token|secret|password|authorization|bearer)($|[_-])|^(apiKey|accessToken|authToken|authorization)$/i
+
+function isRecord(value) {
+  return value && typeof value === 'object' && !Array.isArray(value)
+}
+
+function isAbsolutePath(filePath) {
+  return path.isAbsolute(filePath) || /^[A-Za-z]:[\\/]/.test(String(filePath || ''))
+}
+
+function normalizeAivideoProjectDir(value) {
+  const text = String(value || '').trim()
+  return text ? path.resolve(text) : ''
+}
+
+function resolveAivideoProjectFile(payload = {}) {
+  const explicitProjectFile = String(payload.projectFile || '').trim()
+  if (explicitProjectFile) return path.resolve(explicitProjectFile)
+
+  const projectDir = normalizeAivideoProjectDir(payload.projectDir)
+  if (!projectDir) return ''
+  return path.join(projectDir, 'project.json')
+}
+
+function resolvePortableProjectPath(projectDir, key, value) {
+  const text = String(value || '').trim()
+  if (!text) throw new Error(`Project path "${key}" must be a non-empty string`)
+  if (isAbsolutePath(text)) throw new Error(`Project path "${key}" must be relative`)
+
+  const resolvedPath = path.resolve(projectDir, text)
+  const relativePath = path.relative(projectDir, resolvedPath)
+  if (relativePath === '..' || relativePath.startsWith(`..${path.sep}`) || path.isAbsolute(relativePath)) {
+    throw new Error(`Project path "${key}" must stay inside the project folder`)
+  }
+  return resolvedPath
+}
+
+function resolveAivideoBundlePaths(projectDir, project) {
+  const projectPaths = project?.paths || {}
+  const outputDir = resolvePortableProjectPath(projectDir, 'output', projectPaths.output || 'output')
+  const logsDir = resolvePortableProjectPath(projectDir, 'logs', projectPaths.logs || 'logs')
+  return {
+    projectFile: path.join(projectDir, 'project.json'),
+    outputDir,
+    storyboardPath: resolvePortableProjectPath(projectDir, 'storyboard', projectPaths.storyboard || 'storyboard.json'),
+    outputStoryboardPath: path.join(outputDir, 'storyboard.json'),
+    assetManifestPath: path.join(outputDir, 'asset-manifest.json'),
+    timelinePath: path.join(outputDir, 'timeline.json'),
+    renderManifestPath: path.join(outputDir, 'render-manifest.json'),
+    qaReportPath: path.join(outputDir, 'qa-report.json'),
+    finalVideoPath: path.join(outputDir, 'final.mp4'),
+    logsDir,
+  }
+}
+
+async function readJsonArtifact(key, filePath) {
+  const artifact = await readFileArtifact(key, filePath)
+  if (!artifact.exists) return artifact
+  try {
+    artifact.data = JSON.parse(await fs.readFile(filePath, 'utf8'))
+  } catch (error) {
+    artifact.error = error?.message || String(error)
+  }
+  return artifact
+}
+
+async function readFileArtifact(key, filePath) {
+  try {
+    const info = await fs.stat(filePath)
+    return {
+      key,
+      path: filePath,
+      exists: info.isFile(),
+      size: info.size,
+      modified: info.mtime.toISOString(),
+    }
+  } catch (error) {
+    if (error?.code === 'ENOENT') {
+      return { key, path: filePath, exists: false }
+    }
+    return { key, path: filePath, exists: false, error: error?.message || String(error) }
+  }
+}
+
+async function listAivideoEventLogs(logsDir) {
+  try {
+    const entries = await fs.readdir(logsDir, { withFileTypes: true })
+    const logs = await Promise.all(entries
+      .filter((entry) => entry.isFile() && entry.name.endsWith('.jsonl'))
+      .map(async (entry) => {
+        const filePath = path.join(logsDir, entry.name)
+        const info = await fs.stat(filePath)
+        return {
+          name: entry.name,
+          path: filePath,
+          size: info.size,
+          modified: info.mtime.toISOString(),
+        }
+      }))
+    return logs.sort((a, b) => String(b.modified).localeCompare(String(a.modified)))
+  } catch (error) {
+    if (error?.code === 'ENOENT') return []
+    throw error
+  }
+}
+
+async function loadAivideoProjectBundle(payload = {}) {
+  const projectFile = resolveAivideoProjectFile(payload)
+  if (!projectFile) throw new Error('No AIVideo project folder selected.')
+
+  const projectDir = path.dirname(projectFile)
+  const rawProject = await fs.readFile(projectFile, 'utf8')
+  const project = JSON.parse(rawProject)
+  if (!isRecord(project) || project.schemaVersion !== 1) {
+    throw new Error('AIVideo Studio bridge only supports project schemaVersion 1.')
+  }
+
+  const paths = resolveAivideoBundlePaths(projectDir, project)
+  return {
+    success: true,
+    projectDir,
+    projectFile,
+    project,
+    paths,
+    artifacts: {
+      storyboard: await readJsonArtifact('storyboard', paths.storyboardPath),
+      outputStoryboard: await readJsonArtifact('outputStoryboard', paths.outputStoryboardPath),
+      assetManifest: await readJsonArtifact('assetManifest', paths.assetManifestPath),
+      timeline: await readJsonArtifact('timeline', paths.timelinePath),
+      renderManifest: await readJsonArtifact('renderManifest', paths.renderManifestPath),
+      qaReport: await readJsonArtifact('qaReport', paths.qaReportPath),
+      finalVideo: await readFileArtifact('finalVideo', paths.finalVideoPath),
+    },
+    logs: await listAivideoEventLogs(paths.logsDir),
+  }
+}
+
+function assertAivideoProjectJsonIsPortable(project) {
+  if (!isRecord(project) || project.schemaVersion !== 1) {
+    throw new Error('AIVideo project JSON must be schemaVersion 1.')
+  }
+  assertNoPortableSecrets(project.adapterOptions || {}, 'adapterOptions')
+}
+
+function assertNoPortableSecrets(value, label) {
+  if (!isRecord(value)) return
+  for (const [key, child] of Object.entries(value)) {
+    const nextLabel = `${label}.${key}`
+    if (AIVIDEO_SECRET_KEY_PATTERN.test(key)) {
+      throw new Error(`Project value "${nextLabel}" looks like a secret. Store provider secrets in machine-local settings.`)
+    }
+    assertNoPortableSecrets(child, nextLabel)
+  }
+}
+
+function buildAivideoEnv() {
+  const localBin = path.join(os.homedir(), '.local', 'bin')
+  const pathEntries = String(process.env.PATH || '').split(path.delimiter).filter(Boolean)
+  if (!pathEntries.includes(localBin)) pathEntries.unshift(localBin)
+  return {
+    ...process.env,
+    PATH: pathEntries.join(path.delimiter),
+  }
+}
+
+function runAivideoCli(coreDir, args) {
+  return new Promise((resolve) => {
+    const scriptPath = path.join(coreDir, 'dist', 'cli.js')
+    if (!fsSync.existsSync(scriptPath)) {
+      resolve({ success: false, error: `Missing built CLI at ${scriptPath}. Run npm run build in the AIVideo core first.` })
+      return
+    }
+
+    const nodeCommand = resolveNodeCommand()
+    const child = spawn(nodeCommand, [scriptPath, ...args], {
+      cwd: coreDir,
+      env: buildAivideoEnv(),
+      windowsHide: true,
+    })
+    const stdout = []
+    const stderr = []
+    child.stdout.on('data', (chunk) => stdout.push(String(chunk)))
+    child.stderr.on('data', (chunk) => stderr.push(String(chunk)))
+    child.on('error', (error) => {
+      resolve({ success: false, error: error?.message || String(error), stdout: stdout.join(''), stderr: stderr.join('') })
+    })
+    child.on('close', (code, signal) => {
+      if (code === 0) {
+        resolve({ success: true, stdout: stdout.join(''), stderr: stderr.join('') })
+      } else {
+        resolve({
+          success: false,
+          error: stderr.join('').trim() || `AIVideo CLI exited with code ${code ?? 'unknown'}${signal ? ` (${signal})` : ''}.`,
+          stdout: stdout.join(''),
+          stderr: stderr.join(''),
+        })
+      }
+    })
+  })
+}
+
+ipcMain.handle('aivideo:getDefaults', async () => {
+  const settings = await getAivideoWorkbenchSettings()
+  const projectFile = settings.projectFile || ''
+  const projectDir = settings.projectDir || (projectFile ? path.dirname(projectFile) : '')
+  return {
+    success: true,
+    coreDir: settings.coreDir || createDefaultCoreDir(),
+    projectDir,
+    projectFile,
+    state: aivideoRunner.getState(),
+  }
+})
+
+ipcMain.handle('aivideo:selectCoreDir', async () => {
+  const settings = await getAivideoWorkbenchSettings()
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openDirectory'],
+    title: 'Select AIVideo Core Folder',
+    defaultPath: settings.coreDir || createDefaultCoreDir(),
+  })
+
+  if (result.canceled || result.filePaths.length === 0) {
+    return { success: false, cancelled: true }
+  }
+
+  const coreDir = result.filePaths[0]
+  await setAivideoWorkbenchSettings({ coreDir })
+  return { success: true, coreDir }
+})
+
+ipcMain.handle('aivideo:selectProjectDir', async (_event, options = {}) => {
+  const settings = await getAivideoWorkbenchSettings()
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openDirectory'],
+    title: 'Select AIVideo Project Folder',
+    defaultPath: options.defaultPath || settings.projectDir || settings.projectFile || settings.coreDir || createDefaultCoreDir(),
+  })
+
+  if (result.canceled || result.filePaths.length === 0) {
+    return { success: false, cancelled: true }
+  }
+
+  const projectDir = result.filePaths[0]
+  try {
+    const bundle = await loadAivideoProjectBundle({ projectDir })
+    await setAivideoWorkbenchSettings({ projectDir: bundle.projectDir, projectFile: bundle.projectFile })
+    return bundle
+  } catch (error) {
+    return { success: false, projectDir, error: error?.message || String(error) }
+  }
+})
+
+ipcMain.handle('aivideo:selectProjectFile', async (_event, options = {}) => {
+  const settings = await getAivideoWorkbenchSettings()
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openFile'],
+    title: 'Select AIVideo Project',
+    defaultPath: options.defaultPath || settings.projectFile || settings.coreDir || createDefaultCoreDir(),
+    filters: [
+      { name: 'AIVideo Project', extensions: ['json'] },
+      { name: 'All Files', extensions: ['*'] },
+    ],
+  })
+
+  if (result.canceled || result.filePaths.length === 0) {
+    return { success: false, cancelled: true }
+  }
+
+  const projectFile = result.filePaths[0]
+  try {
+    const bundle = await loadAivideoProjectBundle({ projectFile })
+    await setAivideoWorkbenchSettings({ projectDir: bundle.projectDir, projectFile: bundle.projectFile })
+    return bundle
+  } catch (error) {
+    return { success: false, projectFile, error: error?.message || String(error) }
+  }
+})
+
+ipcMain.handle('aivideo:createProject', async (_event, payload = {}) => {
+  const settings = await getAivideoWorkbenchSettings()
+  const coreDir = String(payload.coreDir || settings.coreDir || createDefaultCoreDir()).trim()
+  const result = payload.projectDir
+    ? { canceled: false, filePaths: [payload.projectDir] }
+    : await dialog.showOpenDialog(mainWindow, {
+        properties: ['openDirectory', 'createDirectory'],
+        title: 'Create AIVideo Project Folder',
+        defaultPath: payload.defaultPath || settings.projectDir || settings.coreDir || createDefaultCoreDir(),
+      })
+
+  if (result.canceled || result.filePaths.length === 0) {
+    return { success: false, cancelled: true }
+  }
+
+  const projectDir = path.resolve(result.filePaths[0])
+  const title = String(payload.title || path.basename(projectDir) || 'AIVideo Project').trim()
+  const brief = String(payload.brief || 'A portable AIVideo project.').trim()
+  const aspectRatio = String(payload.aspectRatio || '16:9').trim()
+  const args = [
+    'init',
+    projectDir,
+    '--title',
+    title,
+    '--brief',
+    brief,
+    '--aspect-ratio',
+    aspectRatio,
+    ...(payload.force ? ['--force'] : []),
+  ]
+  const cliResult = await runAivideoCli(coreDir, args)
+  if (!cliResult.success) {
+    return { ...cliResult, projectDir }
+  }
+
+  try {
+    const bundle = await loadAivideoProjectBundle({ projectDir })
+    await setAivideoWorkbenchSettings({ coreDir, projectDir: bundle.projectDir, projectFile: bundle.projectFile })
+    return bundle
+  } catch (error) {
+    return { success: false, projectDir, error: error?.message || String(error) }
+  }
+})
+
+ipcMain.handle('aivideo:loadProjectBundle', async (_event, payload = {}) => {
+  try {
+    const bundle = await loadAivideoProjectBundle(payload)
+    await setAivideoWorkbenchSettings({ projectDir: bundle.projectDir, projectFile: bundle.projectFile })
+    return bundle
+  } catch (error) {
+    return { success: false, error: error?.message || String(error) }
+  }
+})
+
+ipcMain.handle('aivideo:saveProjectJson', async (_event, payload = {}) => {
+  try {
+    const projectFile = resolveAivideoProjectFile(payload)
+    if (!projectFile) throw new Error('No AIVideo project folder selected.')
+
+    assertAivideoProjectJsonIsPortable(payload.project)
+    await writeFileAtomic(projectFile, `${JSON.stringify(payload.project, null, 2)}\n`, 'utf8')
+    const bundle = await loadAivideoProjectBundle({ projectFile })
+    await setAivideoWorkbenchSettings({ projectDir: bundle.projectDir, projectFile: bundle.projectFile })
+    return bundle
+  } catch (error) {
+    return { success: false, error: error?.message || String(error) }
+  }
+})
+
+ipcMain.handle('aivideo:runProject', async (_event, payload = {}) => {
+  const coreDir = String(payload.coreDir || '').trim()
+  const projectFile = resolveAivideoProjectFile(payload)
+  const projectDir = payload.projectDir ? normalizeAivideoProjectDir(payload.projectDir) : (projectFile ? path.dirname(projectFile) : '')
+  if (coreDir || projectFile || projectDir) {
+    await setAivideoWorkbenchSettings({
+      ...(coreDir ? { coreDir } : {}),
+      ...(projectDir ? { projectDir } : {}),
+      ...(projectFile ? { projectFile } : {}),
+    })
+  }
+  return aivideoRunner.start({ ...payload, projectFile })
+})
+
+ipcMain.handle('aivideo:cancelRun', async () => {
+  return aivideoRunner.cancel()
+})
+
+ipcMain.handle('aivideo:getRunState', async () => {
+  return { success: true, state: aivideoRunner.getState() }
+})
+
+ipcMain.handle('aivideo:readEventLog', async (_event, payload = {}) => {
+  return aivideoRunner.readEventLog(payload?.eventLogPath)
+})
+
+ipcMain.handle('aivideo:openPath', async (_event, filePath) => {
+  const target = String(filePath || '').trim()
+  if (!target) return { success: false, error: 'No file path provided.' }
+  try {
+    const result = await shell.openPath(target)
+    if (result) {
+      return { success: false, error: result }
+    }
+    return { success: true }
+  } catch (error) {
+    return { success: false, error: error?.message || String(error) }
   }
 })
 

@@ -4,6 +4,7 @@ import TitleBar from './components/TitleBar'
 import ExportPanel from './components/ExportPanel'
 import GenerateWorkspace from './components/GenerateWorkspace'
 import FlowAIWorkspace from './components/FlowAIWorkspace'
+import AIVideoWorkspace from './aivideo/AIVideoWorkspace'
 import LLMAssistantWorkspace from './components/LLMAssistantWorkspace'
 import MOGWorkspace from './components/MOGWorkspace'
 import StockPanel from './components/StockPanel'
@@ -272,7 +273,7 @@ function App() {
     } catch (_) { /* ignore */ }
   }, [])
 
-  const isFullScreenTab = mainTab === 'export' || mainTab === 'generate' || mainTab === 'flow-ai' || mainTab === 'mog' || mainTab === 'llm-assistant' || mainTab === 'stock' || mainTab === 'comfyui'
+  const isFullScreenTab = mainTab === 'export' || mainTab === 'aivideo' || mainTab === 'generate' || mainTab === 'flow-ai' || mainTab === 'mog' || mainTab === 'llm-assistant' || mainTab === 'stock' || mainTab === 'comfyui'
   // Editor layout insets (used for content when on Editor, and always for tab bar so it doesn't shift)
   const editorLeftInset = leftPanelExpanded ? ICON_BAR_WIDTH + leftPanelWidth : ICON_BAR_WIDTH
   const editorRightInset = inspectorExpanded ? ICON_BAR_WIDTH + inspectorWidth : ICON_BAR_WIDTH
@@ -532,6 +533,14 @@ function App() {
             sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads"
           />
         </div>
+        {/* AIVideo tab - isolated from the native ComfyStudio project model during the first chassis spike. */}
+        {mainTab === 'aivideo' && (
+          <div className="flex-1 flex flex-col min-h-0 overflow-hidden bg-sf-dark-950">
+            <WorkspaceErrorBoundary>
+              <AIVideoWorkspace />
+            </WorkspaceErrorBoundary>
+          </div>
+        )}
         {/* Generate tab – keep mounted so queue/progress survives tab switches */}
         <div
           className="flex-1 flex flex-col min-h-0 overflow-hidden bg-sf-dark-950"

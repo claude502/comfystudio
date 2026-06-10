@@ -5,6 +5,7 @@ import CreditsChip from './CreditsChip'
 
 const TOP_TABS = [
   { id: 'editor', label: 'Editor' },
+  { id: 'aivideo', label: 'AIVideo' },
   { id: 'generate', label: 'Generate' },
   { id: 'flow-ai', label: 'Flow AI' },
   { id: 'mog', label: 'MoGraph' },

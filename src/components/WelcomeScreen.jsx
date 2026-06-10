@@ -8,6 +8,7 @@ import CreditsChip from './CreditsChip'
 import GettingStartedModal from './GettingStartedModal'
 import ApiKeyDialog from './ApiKeyDialog'
 import SettingsModal from './SettingsModal'
+import AIVideoWorkspace from '../aivideo/AIVideoWorkspace'
 import {
   getComfyPartnerApiKey,
   COMFY_PARTNER_KEY_CHANGED_EVENT,
@@ -166,6 +167,7 @@ function WelcomeScreen() {
   const [deleteProjectDialog, setDeleteProjectDialog] = useState(null)
   const [deleteProjectError, setDeleteProjectError] = useState('')
   const [isDeletingProject, setIsDeletingProject] = useState(false)
+  const [aivideoWorkbenchOpen, setAivideoWorkbenchOpen] = useState(false)
   
   const {
     isFirstRun,
@@ -428,6 +430,40 @@ function WelcomeScreen() {
       </div>
     </div>
   )
+
+  if (aivideoWorkbenchOpen) {
+    return (
+      <div className="h-screen bg-sf-dark-950 flex flex-col">
+        {titleStrip}
+        <div className="flex-shrink-0 flex items-center justify-between px-4 py-2 bg-sf-dark-900 border-y border-sf-dark-700">
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() => setAivideoWorkbenchOpen(false)}
+              className="inline-flex h-8 items-center gap-2 rounded border border-sf-dark-600 bg-sf-dark-800 px-3 text-xs text-sf-text-secondary hover:border-sf-dark-500 hover:text-sf-text-primary"
+            >
+              <FolderOpen className="w-3.5 h-3.5" />
+              ComfyStudio
+            </button>
+            <div className="h-5 w-px bg-sf-dark-600" />
+            <div className="text-sm font-semibold text-sf-text-primary">AIVideo</div>
+          </div>
+          <button
+            type="button"
+            onClick={selectDefaultProjectsLocation}
+            className="inline-flex h-8 items-center gap-2 rounded border border-sf-dark-600 bg-sf-dark-800 px-3 text-xs text-sf-text-secondary hover:border-sf-dark-500 hover:text-sf-text-primary"
+          >
+            <FolderOpen className="w-3.5 h-3.5" />
+            Projects Folder
+          </button>
+        </div>
+        <div className="flex-1 min-h-0">
+          <AIVideoWorkspace />
+        </div>
+      </div>
+    )
+  }
+
   const mediaPreparationBanner = showMediaPreparation ? (
     <div className="pointer-events-none fixed left-1/2 top-1/2 z-50 w-[min(420px,calc(100vw-32px))] -translate-x-1/2 -translate-y-1/2 rounded-xl border border-sf-dark-600 bg-sf-dark-900/95 px-3 py-2 shadow-2xl shadow-black/40">
       <div className="mb-1.5 flex items-center gap-2 text-xs">
@@ -513,11 +549,20 @@ function WelcomeScreen() {
               </div>
             )}
             
+            <button
+              type="button"
+              onClick={() => setAivideoWorkbenchOpen(true)}
+              className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-sf-accent hover:bg-sf-accent-hover border border-sf-accent rounded-lg text-white font-medium shadow-lg shadow-sf-accent/20 transition-colors"
+            >
+              <Film className="w-5 h-5" />
+              AIVideo Workbench
+            </button>
+
             {/* Action Button - simple outlined style */}
             <button
               onClick={selectDefaultProjectsLocation}
               disabled={(!isBrowserSupported && !isElectronMode()) || isLoading}
-              className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-sf-dark-800 hover:bg-sf-dark-700 border border-sf-dark-500 disabled:bg-sf-dark-700 disabled:border-sf-dark-600 disabled:cursor-not-allowed rounded-lg text-sf-text-secondary font-medium transition-colors"
+              className="mt-3 w-full flex items-center justify-center gap-2 px-4 py-3 bg-sf-dark-800 hover:bg-sf-dark-700 border border-sf-dark-500 disabled:bg-sf-dark-700 disabled:border-sf-dark-600 disabled:cursor-not-allowed rounded-lg text-sf-text-secondary font-medium transition-colors"
             >
               {isLoading ? (
                 <Loader2 className="w-5 h-5 animate-spin" />
@@ -574,6 +619,13 @@ function WelcomeScreen() {
       </div>
 
       <div className="flex items-center gap-3">
+        <button
+          onClick={() => setAivideoWorkbenchOpen(true)}
+          className="flex items-center gap-2 px-4 py-2 bg-sf-dark-800 hover:bg-sf-dark-700 border border-sf-dark-500 rounded-lg text-sm text-sf-text-secondary font-medium transition-colors"
+        >
+          <Film className="w-4 h-4" />
+          AIVideo
+        </button>
         <button
           onClick={() => setGettingStartedOpen(true)}
           className="flex items-center gap-2 px-3 py-2 hover:bg-sf-dark-800 rounded-lg text-sm text-sf-text-muted hover:text-sf-text-primary font-medium transition-colors"
