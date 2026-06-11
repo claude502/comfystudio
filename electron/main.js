@@ -3528,6 +3528,76 @@ function runAivideoCli(coreDir, args) {
   })
 }
 
+function normalizeAivideoComfyEndpoint(value) {
+  const raw = String(value || cachedHttpBase || `http://127.0.0.1:${DEFAULT_LOCAL_COMFY_PORT}`).trim()
+  const withProtocol = /^https?:\/\//i.test(raw) ? raw : `http://${raw}`
+  try {
+    const url = new URL(withProtocol)
+    url.pathname = url.pathname.replace(/\/$/, '')
+    url.search = ''
+    url.hash = ''
+    return url.toString().replace(/\/$/, '')
+  } catch (_) {
+    return `http://127.0.0.1:${DEFAULT_LOCAL_COMFY_PORT}`
+  }
+}
+
+async function probeAivideoComfyEndpoint(endpoint) {
+  const normalizedEndpoint = normalizeAivideoComfyEndpoint(endpoint)
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), COMFYUI_CHECK_MS)
+  try {
+    const response = await fetch(`${normalizedEndpoint}/system_stats`, { signal: controller.signal })
+    const text = await response.text()
+    let body = null
+    try {
+      body = text ? JSON.parse(text) : null
+    } catch (_) {
+      body = null
+    }
+    return {
+      ok: response.ok,
+      endpoint: normalizedEndpoint,
+      status: response.status,
+      statusText: response.statusText,
+      body,
+      error: '',
+    }
+  } catch (error) {
+    return {
+      ok: false,
+      endpoint: normalizedEndpoint,
+      status: 0,
+      statusText: '',
+      body: null,
+      error: error?.name === 'AbortError' ? 'timeout' : error?.message || String(error),
+    }
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
+function isPathInside(parentDir, childPath) {
+  const relativePath = path.relative(parentDir, childPath)
+  return relativePath !== '' && !relativePath.startsWith(`..${path.sep}`) && relativePath !== '..' && !path.isAbsolute(relativePath)
+}
+
+function toPortableProjectPath(projectDir, filePath) {
+  return path.relative(projectDir, filePath).split(path.sep).join('/')
+}
+
+async function nextAvailableWorkflowPath(workflowsDir, fileName) {
+  const extension = path.extname(fileName)
+  const baseName = extension ? fileName.slice(0, -extension.length) : fileName
+  let candidate = path.join(workflowsDir, fileName)
+  let counter = 1
+  while (fsSync.existsSync(candidate)) {
+    candidate = path.join(workflowsDir, `${baseName}-${counter}${extension}`)
+    counter += 1
+  }
+  return candidate
+}
+
 ipcMain.handle('aivideo:getDefaults', async () => {
   const settings = await getAivideoWorkbenchSettings()
   const projectFile = settings.projectFile || ''
@@ -3687,6 +3757,64 @@ ipcMain.handle('aivideo:runProject', async (_event, payload = {}) => {
     })
   }
   return aivideoRunner.start({ ...payload, projectFile })
+})
+
+ipcMain.handle('aivideo:getComfyStatus', async (_event, payload = {}) => {
+  const endpoint = normalizeAivideoComfyEndpoint(payload?.endpoint)
+  const http = await probeAivideoComfyEndpoint(endpoint)
+  return {
+    success: true,
+    endpoint: http.endpoint,
+    http,
+    launcher: comfyLauncher.getState(),
+  }
+})
+
+ipcMain.handle('aivideo:selectComfyWorkflow', async (_event, payload = {}) => {
+  try {
+    const projectDir = normalizeAivideoProjectDir(payload.projectDir)
+    if (!projectDir) throw new Error('No AIVideo project folder selected.')
+
+    const currentWorkflowPath = String(payload.currentWorkflowPath || '').trim()
+    const defaultPath = currentWorkflowPath
+      ? (isAbsolutePath(currentWorkflowPath) ? currentWorkflowPath : path.resolve(projectDir, currentWorkflowPath))
+      : path.join(projectDir, 'workflows')
+    const result = await dialog.showOpenDialog(mainWindow, {
+      properties: ['openFile'],
+      title: 'Select ComfyUI Workflow JSON',
+      defaultPath,
+      filters: [
+        { name: 'ComfyUI Workflow', extensions: ['json'] },
+        { name: 'All Files', extensions: ['*'] },
+      ],
+    })
+
+    if (result.canceled || result.filePaths.length === 0) {
+      return { success: false, cancelled: true }
+    }
+
+    const sourcePath = path.resolve(result.filePaths[0])
+    JSON.parse(await fs.readFile(sourcePath, 'utf8'))
+
+    let workflowFile = sourcePath
+    let copied = false
+    if (!isPathInside(projectDir, sourcePath)) {
+      const workflowsDir = resolvePortableProjectPath(projectDir, 'workflows', 'workflows')
+      await fs.mkdir(workflowsDir, { recursive: true })
+      workflowFile = await nextAvailableWorkflowPath(workflowsDir, path.basename(sourcePath))
+      await fs.copyFile(sourcePath, workflowFile)
+      copied = true
+    }
+
+    return {
+      success: true,
+      workflowPath: toPortableProjectPath(projectDir, workflowFile),
+      workflowFile,
+      copied,
+    }
+  } catch (error) {
+    return { success: false, error: error?.message || String(error) }
+  }
 })
 
 ipcMain.handle('aivideo:cancelRun', async () => {

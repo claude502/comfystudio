@@ -360,6 +360,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     cancelRun: () => ipcRenderer.invoke('aivideo:cancelRun'),
     getRunState: () => ipcRenderer.invoke('aivideo:getRunState'),
     readEventLog: (payload = {}) => ipcRenderer.invoke('aivideo:readEventLog', payload),
+    getComfyStatus: (payload = {}) => ipcRenderer.invoke('aivideo:getComfyStatus', payload),
+    selectComfyWorkflow: (payload = {}) => ipcRenderer.invoke('aivideo:selectComfyWorkflow', payload),
     openPath: (filePath) => ipcRenderer.invoke('aivideo:openPath', filePath),
     onRunnerEvent: (cb) => {
       const handler = (_, data) => cb(data)

@@ -4,6 +4,7 @@ import {
   CheckCircle2,
   Boxes,
   Clock3,
+  Cpu,
   ExternalLink,
   FileJson,
   FileText,
@@ -23,6 +24,7 @@ import {
 
 const STAGES = ['plan', 'assets', 'tts', 'render', 'qa']
 const STORAGE_KEY = 'comfystudio-aivideo-workbench'
+const DEFAULT_COMFY_ENDPOINT = 'http://127.0.0.1:8188'
 const ARTIFACT_ROWS = [
   { key: 'storyboard', label: 'Storyboard', icon: FileJson },
   { key: 'assetManifest', label: 'Assets', icon: FileJson },
@@ -118,6 +120,32 @@ function assetKindTone(kind) {
   return 'border-sf-dark-600 bg-sf-dark-800 text-sf-text-muted'
 }
 
+function getComfyOptions(project) {
+  return project?.adapterOptions?.comfyui || {}
+}
+
+function isComfyEnabled(project) {
+  const nodes = project?.nodes || {}
+  const adapters = project?.adapters || {}
+  return nodes.imageGenerator === 'comfyui'
+    || nodes.videoGenerator === 'comfyui'
+    || adapters.assetGenerator === 'comfyui'
+}
+
+function comfyStatusLabel(status) {
+  if (status?.http?.ok) return 'ready'
+  if (status?.launcher?.state && status.launcher.state !== 'unknown') return status.launcher.state
+  return 'offline'
+}
+
+function comfyStatusTone(status) {
+  const label = comfyStatusLabel(status)
+  if (label === 'ready' || label === 'running' || label === 'external') return 'border-emerald-500/35 bg-emerald-500/10 text-emerald-200'
+  if (label === 'starting') return 'border-sf-accent/40 bg-sf-accent/10 text-sf-accent'
+  if (label === 'crashed') return 'border-red-500/35 bg-red-500/10 text-red-200'
+  return 'border-sf-dark-600 bg-sf-dark-800 text-sf-text-muted'
+}
+
 function findTraceForPath(events, filePath) {
   const target = normalizeFilePath(filePath)
   if (!target) return null
@@ -154,6 +182,8 @@ function AIVideoWorkspace() {
   const [finalVideoUrl, setFinalVideoUrl] = useState('')
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
+  const [comfyStatus, setComfyStatus] = useState(null)
+  const [comfyBusy, setComfyBusy] = useState(false)
   const hydratedRef = useRef(false)
 
   const api = window.electronAPI?.aivideo
@@ -375,6 +405,97 @@ function AIVideoWorkspace() {
     setProject((current) => current ? { ...current, [field]: value } : current)
   }, [])
 
+  const updateComfyOption = useCallback((field, value) => {
+    setProject((current) => {
+      if (!current) return current
+      const adapterOptions = current.adapterOptions || {}
+      return {
+        ...current,
+        adapterOptions: {
+          ...adapterOptions,
+          comfyui: {
+            ...(adapterOptions.comfyui || {}),
+            [field]: value,
+          },
+        },
+      }
+    })
+  }, [])
+
+  const enableComfyUi = useCallback(() => {
+    setProject((current) => {
+      if (!current) return current
+      const adapterOptions = current.adapterOptions || {}
+      const comfyui = {
+        endpoint: DEFAULT_COMFY_ENDPOINT,
+        workflowPath: 'workflows/comfyui.json',
+        ...(adapterOptions.comfyui || {}),
+      }
+      if (current.nodes) {
+        return {
+          ...current,
+          nodes: {
+            ...current.nodes,
+            imageGenerator: 'comfyui',
+            videoGenerator: 'comfyui',
+          },
+          adapterOptions: {
+            ...adapterOptions,
+            comfyui,
+          },
+        }
+      }
+      return {
+        ...current,
+        adapters: {
+          ...(current.adapters || {}),
+          assetGenerator: 'comfyui',
+        },
+        adapterOptions: {
+          ...adapterOptions,
+          comfyui,
+        },
+      }
+    })
+  }, [])
+
+  const refreshComfyStatus = useCallback(async () => {
+    if (!api?.getComfyStatus) return
+    setComfyBusy(true)
+    try {
+      const result = await api.getComfyStatus({
+        endpoint: getComfyOptions(project).endpoint || DEFAULT_COMFY_ENDPOINT,
+      })
+      setComfyStatus(result)
+    } catch (err) {
+      setComfyStatus({ success: false, error: err?.message || String(err) })
+    } finally {
+      setComfyBusy(false)
+    }
+  }, [api, project?.adapterOptions?.comfyui?.endpoint])
+
+  const selectComfyWorkflow = useCallback(async () => {
+    const result = await api?.selectComfyWorkflow?.({
+      projectDir,
+      currentWorkflowPath: getComfyOptions(project).workflowPath,
+    })
+    if (result?.success) {
+      updateComfyOption('workflowPath', result.workflowPath)
+    } else if (result && !result.cancelled) {
+      setError(result.error || 'Could not select workflow.')
+    }
+  }, [api, project, projectDir, updateComfyOption])
+
+  useEffect(() => {
+    refreshComfyStatus()
+  }, [refreshComfyStatus])
+
+  useEffect(() => {
+    return window.electronAPI?.comfyLauncher?.onState?.(() => {
+      refreshComfyStatus()
+    })
+  }, [refreshComfyStatus])
+
   const stageRows = useMemo(() => {
     return STAGES.map((stage) => ({
       stage,
@@ -391,6 +512,9 @@ function AIVideoWorkspace() {
 
   const selectedAdapters = project?.nodes || project?.adapters || {}
   const qaIssueCount = getQaIssueCount(bundle, runState)
+  const comfyOptions = getComfyOptions(project)
+  const comfyEnabled = isComfyEnabled(project)
+  const comfyLabel = comfyStatusLabel(comfyStatus)
   const manifestAssets = useMemo(() => {
     const assets = bundle?.artifacts?.assetManifest?.data?.assets
     return Array.isArray(assets) ? assets : []
@@ -563,6 +687,61 @@ function AIVideoWorkspace() {
             </div>
           </div>
           <div className="min-h-0 flex-1 overflow-auto p-3">
+            <div className="mb-4 rounded border border-sf-dark-700 bg-sf-dark-900 p-2">
+              <div className="mb-2 flex items-center gap-2">
+                <Cpu className="h-4 w-4 text-sf-text-muted" />
+                <div className="text-xs font-medium text-sf-text-primary">ComfyUI</div>
+                <div className={`ml-auto rounded border px-1.5 py-0.5 text-[10px] ${comfyStatusTone(comfyStatus)}`}>
+                  {comfyBusy ? 'checking' : comfyLabel}
+                </div>
+              </div>
+              <label className="mb-1 block text-[10px] font-semibold uppercase text-sf-text-muted">Endpoint</label>
+              <div className="mb-2 flex gap-1.5">
+                <input
+                  value={comfyOptions.endpoint || DEFAULT_COMFY_ENDPOINT}
+                  onChange={(event) => updateComfyOption('endpoint', event.target.value)}
+                  disabled={!project}
+                  className="h-8 min-w-0 flex-1 rounded border border-sf-dark-600 bg-sf-dark-950 px-2 font-mono text-[11px] text-sf-text-primary outline-none focus:border-sf-accent disabled:opacity-50"
+                />
+                <button
+                  type="button"
+                  onClick={refreshComfyStatus}
+                  disabled={comfyBusy}
+                  className="inline-flex h-8 w-8 items-center justify-center rounded border border-sf-dark-600 bg-sf-dark-800 text-sf-text-secondary hover:border-sf-dark-500 hover:text-sf-text-primary disabled:cursor-not-allowed disabled:opacity-40"
+                  title="Refresh ComfyUI status"
+                >
+                  {comfyBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+                </button>
+              </div>
+              <label className="mb-1 block text-[10px] font-semibold uppercase text-sf-text-muted">Workflow</label>
+              <div className="mb-2 flex gap-1.5">
+                <div
+                  className="flex h-8 min-w-0 flex-1 items-center truncate rounded border border-sf-dark-700 bg-sf-dark-950 px-2 font-mono text-[11px] text-sf-text-muted"
+                  title={comfyOptions.workflowPath || ''}
+                >
+                  {comfyOptions.workflowPath || 'workflows/comfyui.json'}
+                </div>
+                <button
+                  type="button"
+                  onClick={selectComfyWorkflow}
+                  disabled={!projectDir}
+                  className="inline-flex h-8 items-center gap-1 rounded border border-sf-dark-600 bg-sf-dark-800 px-2 text-[11px] text-sf-text-secondary hover:border-sf-dark-500 hover:text-sf-text-primary disabled:cursor-not-allowed disabled:opacity-40"
+                  title="Select workflow"
+                >
+                  <FolderOpen className="h-3.5 w-3.5" />
+                  Pick
+                </button>
+              </div>
+              <button
+                type="button"
+                onClick={enableComfyUi}
+                disabled={!project || comfyEnabled}
+                className="inline-flex h-8 w-full items-center justify-center rounded border border-sf-dark-600 bg-sf-dark-800 px-2 text-xs text-sf-text-secondary hover:border-sf-dark-500 hover:text-sf-text-primary disabled:cursor-not-allowed disabled:opacity-50"
+                title={comfyEnabled ? 'ComfyUI selected' : 'Use ComfyUI for generated media'}
+              >
+                {comfyEnabled ? 'ComfyUI selected' : 'Use ComfyUI'}
+              </button>
+            </div>
             <div className="mb-2 text-[10px] font-semibold uppercase tracking-[0.16em] text-sf-text-muted">Adapters</div>
             <div className="space-y-1.5">
               {Object.entries(selectedAdapters).length > 0 ? (
