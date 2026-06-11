@@ -24,6 +24,9 @@ const {
   createDefaultCoreDir,
   resolveNodeCommand,
 } = require('./aivideoRunner')
+const {
+  getAivideoToolRegistry,
+} = require('./aivideoToolRegistry')
 
 const isDev = !app.isPackaged
 
@@ -3767,6 +3770,21 @@ ipcMain.handle('aivideo:getComfyStatus', async (_event, payload = {}) => {
     endpoint: http.endpoint,
     http,
     launcher: comfyLauncher.getState(),
+  }
+})
+
+ipcMain.handle('aivideo:getToolRegistry', async (_event, payload = {}) => {
+  try {
+    const launcherSettings = await refreshLauncherConfigCache()
+    const endpoint = normalizeAivideoComfyEndpoint(payload?.comfyEndpoint || launcherSettings.httpBase)
+    return await getAivideoToolRegistry({
+      ffmpegPath,
+      comfyRootPath: launcherSettings.comfyRootPath,
+      comfyEndpoint: endpoint,
+      comfyLauncherState: comfyLauncher.getState(),
+    })
+  } catch (error) {
+    return { success: false, error: error?.message || String(error), tools: [], summary: {} }
   }
 })
 

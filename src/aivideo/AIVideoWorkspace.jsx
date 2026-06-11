@@ -18,6 +18,7 @@ import {
   Square,
   Timer,
   TerminalSquare,
+  Wrench,
   Workflow,
   XCircle,
 } from 'lucide-react'
@@ -146,6 +147,20 @@ function comfyStatusTone(status) {
   return 'border-sf-dark-600 bg-sf-dark-800 text-sf-text-muted'
 }
 
+function toolStatusLabel(status) {
+  if (status === 'ready') return 'Ready'
+  if (status === 'missing') return 'Missing'
+  if (status === 'misconfigured') return 'Needs setup'
+  return 'Unknown'
+}
+
+function toolStatusTone(status) {
+  if (status === 'ready') return 'border-emerald-500/35 bg-emerald-500/10 text-emerald-200'
+  if (status === 'misconfigured') return 'border-amber-500/35 bg-amber-500/10 text-amber-200'
+  if (status === 'missing') return 'border-sf-dark-600 bg-sf-dark-800 text-sf-text-muted'
+  return 'border-sf-dark-600 bg-sf-dark-800 text-sf-text-muted'
+}
+
 function findTraceForPath(events, filePath) {
   const target = normalizeFilePath(filePath)
   if (!target) return null
@@ -184,6 +199,8 @@ function AIVideoWorkspace() {
   const [saving, setSaving] = useState(false)
   const [comfyStatus, setComfyStatus] = useState(null)
   const [comfyBusy, setComfyBusy] = useState(false)
+  const [toolRegistry, setToolRegistry] = useState(null)
+  const [toolBusy, setToolBusy] = useState(false)
   const hydratedRef = useRef(false)
 
   const api = window.electronAPI?.aivideo
@@ -401,6 +418,11 @@ function AIVideoWorkspace() {
     await api?.openPath?.(finalVideoPath)
   }, [api, finalVideoPath])
 
+  const openToolPath = useCallback(async (filePath) => {
+    if (!filePath) return
+    await api?.openPath?.(filePath)
+  }, [api])
+
   const updateProjectField = useCallback((field, value) => {
     setProject((current) => current ? { ...current, [field]: value } : current)
   }, [])
@@ -474,6 +496,21 @@ function AIVideoWorkspace() {
     }
   }, [api, project?.adapterOptions?.comfyui?.endpoint])
 
+  const refreshToolRegistry = useCallback(async () => {
+    if (!api?.getToolRegistry) return
+    setToolBusy(true)
+    try {
+      const result = await api.getToolRegistry({
+        comfyEndpoint: getComfyOptions(project).endpoint || DEFAULT_COMFY_ENDPOINT,
+      })
+      setToolRegistry(result)
+    } catch (err) {
+      setToolRegistry({ success: false, error: err?.message || String(err), tools: [] })
+    } finally {
+      setToolBusy(false)
+    }
+  }, [api, project?.adapterOptions?.comfyui?.endpoint])
+
   const selectComfyWorkflow = useCallback(async () => {
     const result = await api?.selectComfyWorkflow?.({
       projectDir,
@@ -491,10 +528,15 @@ function AIVideoWorkspace() {
   }, [refreshComfyStatus])
 
   useEffect(() => {
+    refreshToolRegistry()
+  }, [refreshToolRegistry])
+
+  useEffect(() => {
     return window.electronAPI?.comfyLauncher?.onState?.(() => {
       refreshComfyStatus()
+      refreshToolRegistry()
     })
-  }, [refreshComfyStatus])
+  }, [refreshComfyStatus, refreshToolRegistry])
 
   const stageRows = useMemo(() => {
     return STAGES.map((stage) => ({
@@ -515,6 +557,8 @@ function AIVideoWorkspace() {
   const comfyOptions = getComfyOptions(project)
   const comfyEnabled = isComfyEnabled(project)
   const comfyLabel = comfyStatusLabel(comfyStatus)
+  const toolRows = toolRegistry?.tools || []
+  const toolSummary = toolRegistry?.summary || {}
   const manifestAssets = useMemo(() => {
     const assets = bundle?.artifacts?.assetManifest?.data?.assets
     return Array.isArray(assets) ? assets : []
@@ -617,7 +661,10 @@ function AIVideoWorkspace() {
         </button>
         <button
           type="button"
-          onClick={refreshState}
+          onClick={() => {
+            refreshState()
+            refreshToolRegistry()
+          }}
           className="inline-flex h-8 w-8 items-center justify-center rounded border border-sf-dark-600 bg-sf-dark-800 text-sf-text-secondary hover:border-sf-dark-500 hover:text-sf-text-primary"
           title="Refresh"
         >
@@ -892,6 +939,74 @@ function AIVideoWorkspace() {
                 )
               })}
             </div>
+          </div>
+          <div className="max-h-72 overflow-auto border-b border-sf-dark-700 p-3">
+            <div className="mb-2 flex items-center gap-2">
+              <Wrench className="h-4 w-4 text-sf-text-muted" />
+              <div className="text-xs font-medium text-sf-text-primary">Tools</div>
+              <div className="ml-auto text-[10px] text-sf-text-muted">
+                {toolSummary.ready || 0} ready
+              </div>
+              <button
+                type="button"
+                onClick={refreshToolRegistry}
+                disabled={toolBusy}
+                className="inline-flex h-6 w-6 items-center justify-center rounded border border-sf-dark-600 bg-sf-dark-800 text-sf-text-secondary hover:border-sf-dark-500 hover:text-sf-text-primary disabled:cursor-not-allowed disabled:opacity-40"
+                title="Refresh tools"
+              >
+                {toolBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
+              </button>
+            </div>
+            {toolRegistry?.success === false && (
+              <div className="mb-2 rounded border border-red-500/25 bg-red-500/10 px-2 py-1.5 text-[10px] text-red-200">
+                {toolRegistry.error || 'Could not read tool registry.'}
+              </div>
+            )}
+            {toolRows.length > 0 ? (
+              <div className="space-y-1.5">
+                {toolRows.map((tool) => {
+                  const primaryPath = tool.executablePath || tool.installDir
+                  const logPath = tool.logs?.[0]?.path || ''
+                  return (
+                    <div key={tool.id} className="rounded border border-sf-dark-700 bg-sf-dark-900 px-2 py-1.5">
+                      <div className="mb-1 flex items-center gap-2">
+                        <div className="min-w-0 flex-1 truncate text-xs text-sf-text-primary" title={tool.role}>
+                          {tool.displayName}
+                        </div>
+                        <div className={`rounded border px-1.5 py-0.5 text-[10px] ${toolStatusTone(tool.status)}`}>
+                          {toolStatusLabel(tool.status)}
+                        </div>
+                      </div>
+                      <div className="mb-1 truncate font-mono text-[10px] text-sf-text-muted" title={primaryPath}>
+                        {shortPath(primaryPath)}
+                      </div>
+                      <div className="flex items-center gap-1.5 text-[10px] text-sf-text-muted">
+                        <span className="min-w-0 flex-1 truncate" title={tool.message}>
+                          {tool.version ? `v${tool.version}` : tool.message}
+                        </span>
+                        {tool.endpoint && (
+                          <span className="truncate font-mono" title={tool.endpoint}>
+                            {tool.endpoint.replace(/^https?:\/\//, '')}
+                          </span>
+                        )}
+                        {logPath && (
+                          <button
+                            type="button"
+                            onClick={() => openToolPath(logPath)}
+                            className="inline-flex h-5 w-5 items-center justify-center rounded border border-sf-dark-600 text-sf-text-secondary hover:border-sf-dark-500 hover:text-sf-text-primary"
+                            title="Open tool log"
+                          >
+                            <ExternalLink className="h-3 w-3" />
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            ) : (
+              <div className="text-xs text-sf-text-muted">No tool registry yet.</div>
+            )}
           </div>
           <div className="max-h-56 overflow-auto border-b border-sf-dark-700 p-3">
             <div className="mb-2 flex items-center gap-2">

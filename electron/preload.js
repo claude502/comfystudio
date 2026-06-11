@@ -361,6 +361,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getRunState: () => ipcRenderer.invoke('aivideo:getRunState'),
     readEventLog: (payload = {}) => ipcRenderer.invoke('aivideo:readEventLog', payload),
     getComfyStatus: (payload = {}) => ipcRenderer.invoke('aivideo:getComfyStatus', payload),
+    getToolRegistry: (payload = {}) => ipcRenderer.invoke('aivideo:getToolRegistry', payload),
     selectComfyWorkflow: (payload = {}) => ipcRenderer.invoke('aivideo:selectComfyWorkflow', payload),
     openPath: (filePath) => ipcRenderer.invoke('aivideo:openPath', filePath),
     onRunnerEvent: (cb) => {
